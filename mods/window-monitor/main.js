@@ -12,6 +12,9 @@ const INSTALLED_AS = /\/mods\/([^/]+)\/main\.js/.exec(new Error().stack ?? "")?.
 const SCREEN_RECORDING_SETTINGS = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 // How often the open picker re-lists windows and retakes their thumbnails.
 const THUMBNAIL_REFRESH_MS = 2000;
+// Frame rates the settings offer (the helper's --fps); 2 is the default.
+const FPS_CHOICES = [1, 2, 5, 10];
+const DEFAULT_FPS = 2;
 
 // Removes frame folders left by copies whose Herdr process is gone (crash or
 // forced quit: their close() never ran). Live copies, in this or another
@@ -87,6 +90,9 @@ export default class WindowMonitor extends View {
     this.closed = false;
     this.busy = false;
     this.polling = false;
+    this.reading = false;
+    this.live = false;
+    this.frameTimer = null;
     this.hovered = false;
     this.error = "";
     this.messageKey = "idle";
@@ -123,6 +129,7 @@ export default class WindowMonitor extends View {
   }
 
   get publishDelayMs() { return this.config.publishDelayMs ?? this.settings.delayMs ?? 0; }
+  get fps() { return FPS_CHOICES.includes(this.settings.fps) ? this.settings.fps : DEFAULT_FPS; }
 
   // Helper built, permission granted, display window known; then the picker.
   async prepare() {
@@ -152,7 +159,7 @@ export default class WindowMonitor extends View {
 
   openSettings() {
     openOverlay({
-      mod: this.modName, kind: "dialog", width: 520, height: 300,
+      mod: this.modName, kind: "dialog", width: 520, height: 440,
       props: { role: "settings", lang: this.lang, fixed: this.config.publishDelayMs ?? null },
     });
   }
@@ -252,7 +259,7 @@ export default class WindowMonitor extends View {
     checked(await exec("/bin/rm", ["-rf", this.directory]));
   }
 
-  async start() {
+  async start(cx) {
     this.bindPane();
     if (!this.guiWindow || !this.selected) throw new Error(this.t.notReady);
     // Without its pane the copy can't tell when the pane is hidden; start
@@ -261,6 +268,8 @@ export default class WindowMonitor extends View {
     if (this.waitingForPane) { this.messageKey = "clickPane"; return; }
     const delay = this.publishDelayMs;
     if (!Number.isInteger(delay) || delay < 0 || delay > 500) throw new Error(this.t.badDelay);
+    const fps = this.fps;
+    this.stopFrameTimer();
     if (this.terminal) {
       await this.writeControl("stop", true);
       checked(await hc(["kill", this.terminal, "--json"]));
@@ -277,7 +286,7 @@ export default class WindowMonitor extends View {
     this.enabled = true;
     await this.writeControl(this.shown() ? "run" : "pause", true);
     const result = JSON.parse(checked(await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--",
-      this.helper, "--window-id", String(this.selected.id), "--fps", "2", "--max-edge", "1280",
+      this.helper, "--window-id", String(this.selected.id), "--fps", String(fps), "--max-edge", "1280",
       "--png-dir", this.sessionDirectory, "--publish-delay-ms", String(delay),
       "--stats", `${this.sessionDirectory}/stats.json`, "--control", this.control])));
     this.terminal = result.address;
@@ -286,14 +295,22 @@ export default class WindowMonitor extends View {
       await hc(["kill", this.terminal, "--json"]);
       return;
     }
+    this.frameTimer = cx.timer.every(Math.round(1000 / fps), (cx) => this.readFrame(cx));
     this.saveSettings({ target: { app: this.selected.app, title: this.selected.title } });
     this.messageKey = "starting";
     this.claimedAt = 0; // publish the new target with the next claim
   }
 
+  stopFrameTimer() {
+    this.frameTimer?.cancel();
+    this.frameTimer = null;
+    this.live = false;
+  }
+
   async stop(cx) {
     this.enabled = false;
     this.waitingForPane = false;
+    this.stopFrameTimer();
     await this.writeControl("stop", true);
     if (this.terminal) checked(await hc(["kill", this.terminal, "--json"]));
     this.terminal = null;
@@ -323,7 +340,7 @@ export default class WindowMonitor extends View {
       "request-permission": async () => { await exec(this.helper, ["--request-permission"]); await this.prepare(); },
       "open-settings": async () => { checked(await exec("/usr/bin/open", [SCREEN_RECORDING_SETTINGS])); },
       retry: () => this.prepare(),
-      start: () => this.start(),
+      start: (cx) => this.start(cx),
       stop: (cx) => this.stop(cx),
     };
     if (!tasks[command]) return;
@@ -368,28 +385,14 @@ export default class WindowMonitor extends View {
         if (terminal.finished_ms != null) {
           this.enabled = false;
           this.terminal = null;
+          this.stopFrameTimer();
           messageKey = "ended";
           if (terminal.exit_code !== 0 && !this.error) this.error = this.t.helperExit(terminal.exit_code);
         }
-        let changed = messageKey !== this.messageKey;
+        const changed = messageKey !== this.messageKey;
         this.messageKey = messageKey;
-        if (visible && this.enabled) {
-          const metadata = await readTextFile(`${this.sessionDirectory}/current.json`);
-          if (this.closed || this.terminal !== address) return;
-          if (metadata) {
-            const frame = JSON.parse(metadata);
-            if (frame.frame !== this.frame) {
-              this.frame = frame.frame;
-              this.imageWidth = frame.width;
-              this.imageHeight = frame.height;
-              // The previous image stays underneath: image() paints nothing
-              // while the new file loads or reloads after its change event.
-              this.previousFile = this.file;
-              this.file = `${this.sessionRelative}/${frame.file.split("/").pop()}`;
-              changed = true;
-            }
-          }
-        }
+        // Frames are read by the frame timer, at the capture's frame rate.
+        this.live = visible && this.enabled;
         if (changed && visible) cx.notify();
       } catch (e) {
         this.error = message(e);
@@ -400,11 +403,40 @@ export default class WindowMonitor extends View {
     });
   }
 
+  // Shows the helper's newest image; runs once per frame interval while live.
+  readFrame(cx) {
+    if (this.closed || this.busy || this.reading || !this.live || !this.terminal) return;
+    this.reading = true;
+    const address = this.terminal;
+    cx.spawn(async (cx) => {
+      try {
+        const metadata = await readTextFile(`${this.sessionDirectory}/current.json`);
+        if (this.closed || this.terminal !== address || !this.live || !metadata) return;
+        const frame = JSON.parse(metadata);
+        if (frame.frame === this.frame) return;
+        this.frame = frame.frame;
+        this.imageWidth = frame.width;
+        this.imageHeight = frame.height;
+        // The previous image stays underneath: image() paints nothing
+        // while the new file loads or reloads after its change event.
+        this.previousFile = this.file;
+        this.file = `${this.sessionRelative}/${frame.file.split("/").pop()}`;
+        cx.notify();
+      } catch (e) {
+        this.error = message(e);
+        cx.notify();
+      } finally {
+        this.reading = false;
+      }
+    });
+  }
+
   async close() {
     if (this.role === "picker") return this.closePicker();
     if (this.role !== "pane") return;
     this.closed = true;
     this.enabled = false;
+    this.stopFrameTimer();
     if (this.terminal) run("terminal.kill", { terminal: this.terminal });
     if (this.guiPID && this.guiWindow) await this.writeControl("stop", true);
     this.claim(panes().filter((p) => p.mod === this.modName), Date.now());
@@ -531,6 +563,8 @@ export default class WindowMonitor extends View {
         const command = await nextCommand();
         if (command === "delay-0" || command === "delay-250") {
           if (this.config.fixed == null) this.saveSettings({ delayMs: Number(command.slice(6)) });
+        } else if (command.startsWith("fps-") && FPS_CHOICES.includes(Number(command.slice(4)))) {
+          this.saveSettings({ fps: Number(command.slice(4)) });
         } else if (command === "close") closeOverlay(this.config.overlay);
       }
     });
@@ -607,6 +641,10 @@ export default class WindowMonitor extends View {
     const fixed = this.config.fixed != null;
     const delay = this.config.fixed ?? this.settings.delayMs ?? 0;
     return v_flex().id("settings").size_full().p(16).gap(10).bg(c.popover).text_color(c.foreground).text_size(13)
+      .child(div().font_semibold().text_size(15).child(t.fpsTitle))
+      .child(h_flex().gap(8).children(FPS_CHOICES.map((n) =>
+        this.button(`fps-${n}`, t.fpsChoice(n), true, () => this.saveSettings({ fps: n }), this.fps === n))))
+      .child(div().text_color(c.muted).child(t.fpsBody))
       .child(div().font_semibold().text_size(15).child(t.delayTitle))
       .child(h_flex().gap(8)
         .child(this.button("delay-0", t.delayFast, !fixed, () => this.saveSettings({ delayMs: 0 }), delay === 0))

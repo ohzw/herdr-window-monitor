@@ -31,6 +31,10 @@ Requirements: macOS 14 or later, Herdr 0.1.13 (the version this was tested with)
 - Capture pauses while the pane is in another tab or Herdr is minimized, and resumes when it shows again. Closing the pane stops it and deletes its images.
 - One window per pane. Open more panes to watch more windows; a window already watched in another pane is shown as such and can't be picked twice.
 
+### Settings: frame rate
+
+The most new images per second: **1**, **2** (default), **5** or **10 fps**. A window that doesn't change sends no new images. A higher rate is smoother but uses more CPU and writes more PNG data (see Limits). With the 250 ms wait below, about 4 images per second at most, whatever the setting. Applies the next time a capture starts.
+
 ### Settings: wait before showing a new image
 
 Herdr has no way to tell a mod that a new image has finished loading, so switching images can briefly show a blank or the previous image.
@@ -47,7 +51,7 @@ The setting applies the next time a capture starts. The language follows macOS (
 Herdr asks agents to tell you this before adding a mod.
 
 - **Runs programs:** its own helper (`.bin/window-monitor-helper`, built from the included source), started as a background terminal with `hc run`; a copy of it, `.bin/window-monitor-lister`, that lists windows and takes their thumbnails for the dialog; `/bin/sh`, `mkdir`, `rm`, `test`, `defaults read -g AppleLanguages`, `open` (System Settings), and `helper/build.sh` when you press Build helper.
-- **Reads and writes outside its folder:** `~/.config/herdr-app/mods/window-monitor-feed-<id>/` for each open pane: a control file, the helper's stats, the newest two or three PNG frames (1280 px at most, 2 frames per second at most) and, while the window dialog is open, the newest two sets of thumbnails (480 px at most). Stopping deletes the frames; closing the dialog deletes its thumbnails; closing the pane deletes the folder. Folders no live pane has touched for a minute (left by a crash, or by a pane dropped when the mod was updated) are deleted when a pane opens. Inside its folder: `.bin/window-monitor-lister.lock`, so two listings never run at once.
+- **Reads and writes outside its folder:** `~/.config/herdr-app/mods/window-monitor-feed-<id>/` for each open pane: a control file, the helper's stats, the newest two or three PNG frames (1280 px at most, at the frame rate set in Settings: 2 per second by default, 10 at most) and, while the window dialog is open, the newest two sets of thumbnails (480 px at most). Stopping deletes the frames; closing the dialog deletes its thumbnails; closing the pane deletes the folder. Folders no live pane has touched for a minute (left by a crash, or by a pane dropped when the mod was updated) are deleted when a pane opens. Inside its folder: `.bin/window-monitor-lister.lock`, so two listings never run at once.
 - **Network:** none.
 - **Captures:** while the window dialog is open, a still image of every window it lists, every 2 seconds; otherwise only the window you picked, and only while its pane is visible.
 
@@ -55,7 +59,8 @@ Herdr asks agents to tell you this before adding a mod.
 
 - Tested on Apple Silicon, macOS 26.6 and Herdr 0.1.13, with a test window. Long sessions (hours) are not tested.
 - The very first permission prompt flow on a Mac that never allowed screen recording for Herdr is not tested.
-- Each new image is written as a PNG file (about 0.25 MB/s while the watched window changes). While the window dialog is open, each refresh writes about 1–2 MB of thumbnails (depends on the number of windows).
+- Each new image is written as a PNG file (about 0.25 MB/s at 2 fps while the watched window changes, rising with the frame rate). While the window dialog is open, each refresh writes about 1–2 MB of thumbnails (depends on the number of windows).
+- 5 and 10 fps are not tested with a changing window (only 2 fps is).
 - Starting or stopping one capture can interrupt another pane's capture for a few seconds; the helper rebuilds its stream by itself.
 
 ## License
