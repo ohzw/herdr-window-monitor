@@ -26,10 +26,11 @@ Requirements: macOS 14 or later, Herdr 0.1.13 (the version this was tested with)
 ## Use
 
 - When the pane is ready, a dialog shows your windows as cards with a current thumbnail of each, refreshed every 2 seconds while the dialog is open. Pick one and press **Start**, or double-click a card. The window you watched last time is preselected; capture never starts without pressing Start (or double-clicking).
-- While watching, the pane shows only the picture. Move the pointer over it for the bar: **Stop**, **Other window**, **Settings**.
+- While watching, the pane shows only the picture. Move the pointer over it for the bar: **Stop**, **Float**, **Other window**, **Settings**.
+- **Float** moves the picture into a small window (480 px on its long side) that stays above every tab inside Herdr, so you can keep watching while you work in another tab. Drag it anywhere; each pane's window opens where you last left it. It zooms like the pane; while zoomed, a drag pans the picture instead of moving the window. Hover it for **Back to pane**. Meanwhile the pane keeps **Back to pane**, **Stop**, **Other window** and **Settings**. The window stays inside the Herdr window (it isn't a macOS picture-in-picture over other apps), and switching Herdr's layout closes it.
 - Zoom with a two-finger scroll on the trackpad (or the mouse wheel), no key needed, up to 800 %, around the pointer. While zoomed, drag the picture to move it. Double-click the picture, or press the **<zoom> % · Fit** button at bottom right, to fit it again. The picture is captured at most 1280 px on its long side, so high zoom gets blurry. Trackpad pinch isn't available: Herdr doesn't pass pinch gestures to mods.
 - A notice stays on the picture whenever it isn't live (paused, ended, the window was closed), so a frozen image can't pass for a live one.
-- Capture pauses while the pane is in another tab or Herdr is minimized, and resumes when it shows again. Closing the pane stops it and deletes its images.
+- Capture pauses while the pane is in another tab or Herdr is minimized, and resumes when it shows again; with the floating window open, it runs in any tab. Closing the pane stops it, closes its floating window and deletes its images.
 - One window per pane. Open more panes to watch more windows; a window already watched in another pane is shown as such and can't be picked twice.
 
 ### Settings: frame rate
@@ -64,6 +65,7 @@ Herdr asks agents to tell you this before adding a mod.
 
 - Tested on Apple Silicon, macOS 26.6 and Herdr 0.1.13, with a test window. Long sessions (hours) are not tested.
 - The very first permission prompt flow on a Mac that never allowed screen recording for Herdr is not tested.
+- The floating window was tested by opening it, switching tabs, going back to the pane, stopping and closing the pane, all through mod commands. Pointer use inside it (dragging, zooming, its **Back to pane** button) is not tested.
 - Each new image is written as a PNG file (about 0.25 MB/s at 2 fps while the watched window changes, rising with the frame rate). While the window dialog is open, each refresh writes about 1–2 MB of thumbnails (depends on the number of windows).
 - At 20 fps, a constantly changing 1280×800 window measured about 20 % of one CPU core and 6–7 MB/s of PNG writes in the helper. 5, 10 and 20 fps are not tested for display in a pane with a changing window (only 2 fps is).
 - Starting or stopping one capture can interrupt another pane's capture for a few seconds; the helper rebuilds its stream by itself.

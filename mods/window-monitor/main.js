@@ -20,6 +20,10 @@ const MAX_ZOOM = 8;
 // The settings dialog samples load this often and graphs this many samples.
 const LOAD_SAMPLE_MS = 1000;
 const LOAD_SAMPLES = 60;
+// The floating window's longer side, in px, when it opens.
+const PIP_EDGE = 480;
+// A floating window or its pane is gone when its heartbeat is older than this.
+const PIP_STALE_MS = 6000;
 
 // Removes frame folders left by copies whose Herdr process is gone (crash or
 // forced quit: their close() never ran). Live copies, in this or another
@@ -67,8 +71,9 @@ async function systemLanguage() {
   return /^\(?\s*"?ja/.test(result.stdout.trim()) ? "ja" : "en";
 }
 
-// One mod, three roles: the pane (default), and two dialogs it opens with
-// props.role "picker" (choose a window) and "settings" (the wait setting).
+// One mod, four roles: the pane (default), two dialogs it opens with
+// props.role "picker" (choose a window) and "settings" (the wait setting), and
+// "pip", a floating window inside Herdr that shows the pane's capture.
 export default class WindowMonitor extends View {
   init(_props, cx) {
     this.config = props() ?? {};
@@ -78,6 +83,7 @@ export default class WindowMonitor extends View {
     this.role = this.config.overlay ? this.config.role : "pane";
     if (this.role === "picker") return this.initPicker(cx);
     if (this.role === "settings") return this.initSettings(cx);
+    if (this.role === "pip") return this.initPip(cx);
     this.initPane(cx);
   }
 
@@ -129,6 +135,14 @@ export default class WindowMonitor extends View {
     this.size = { width: 640, height: 480 };
     this.zoom = 1;
     this.pan = { x: 0, y: 0 };
+    // The floating window: the pane publishes the capture under feedKey, the
+    // window answers under seenKey. The pane keeps running the helper.
+    this.pipId = null;
+    this.pipOpenedAt = 0;
+    this.pipFeedKey = `${this.modName}:pip-feed:${this.instance}`;
+    this.pipSeenKey = `${this.modName}:pip-seen:${this.instance}`;
+    this.lastPipFeed = "";
+    this.lastPipFeedAt = 0;
     this.bindPane();
     cx.spawn(async (cx) => {
       try {
@@ -146,7 +160,9 @@ export default class WindowMonitor extends View {
       this.bindPane();
       this.takePick(cx);
       if (this.waitingForPane && this.pane) this.action("start", cx);
+      this.checkPip(cx);
       this.poll(cx);
+      this.publishPip();
     });
     cx.spawn(async (cx) => {
       for (;;) this.action(await nextCommand(), cx);
@@ -256,11 +272,72 @@ export default class WindowMonitor extends View {
     setShared(this.claimsKey, claims);
   }
 
-  shown() {
+  // Capture runs while the pane or its floating window is on screen.
+  shown() { return this.paneShown() || this.pipOpen; }
+
+  paneShown() {
     this.bindPane();
     const pane = panes().find((p) => p.pane === this.pane);
     const tab = spaces().find((s) => s.active)?.tabs.find((t) => t.active);
     return Boolean(pane && tab?.id === pane.tab && (!tab.zoomed || pane.zoomed));
+  }
+
+  // Open from openOverlay until the window says it closed or stops answering
+  // (a layout switch closes it; a mod reload drops it). It gets 3 seconds to
+  // answer the first time.
+  get pipOpen() {
+    if (!this.pipId) return false;
+    const seen = shared(this.pipSeenKey);
+    if (seen?.overlay === this.pipId) return !seen.closed && Date.now() - seen.at < PIP_STALE_MS;
+    return Date.now() - this.pipOpenedAt < 3000;
+  }
+
+  openPip() {
+    if (!this.terminal || this.pipId || !this.pane) return;
+    const ratio = (this.imageWidth ?? 1280) / (this.imageHeight ?? 800);
+    const width = ratio >= 1 ? PIP_EDGE : Math.round(PIP_EDGE * ratio);
+    const height = ratio >= 1 ? Math.round(PIP_EDGE / ratio) : PIP_EDGE;
+    this.pipOpenedAt = Date.now();
+    this.live = false; // the pane stops showing images while the window does
+    // Published first: the window closes itself when it finds no feed.
+    this.publishPip(true);
+    this.pipId = openOverlay({
+      // Keyed by pane: each pane's window remembers where it was dropped.
+      mod: this.modName, kind: "window", key: `${this.modName}:pip:${this.pane}`, width, height,
+      props: { role: "pip", lang: this.lang, feedKey: this.pipFeedKey, seenKey: this.pipSeenKey },
+    });
+  }
+
+  closePip() {
+    if (this.pipId) closeOverlay(this.pipId);
+    this.pipId = null;
+    setShared(this.pipFeedKey, null);
+    setShared(this.pipSeenKey, null);
+  }
+
+  // The window closed itself ("Back to pane") or went away: show the capture
+  // in the pane again.
+  checkPip(cx) {
+    if (!this.pipId || this.pipOpen) return;
+    this.closePip();
+    cx.notify();
+  }
+
+  // What the floating window shows. Written when it changes, and every 2
+  // seconds as the pane's heartbeat (shared state re-renders every mod).
+  publishPip(force = false) {
+    if (!this.pipId && !force) return;
+    const notice = this.error || (this.messageKey === "watching" ? "" : this.t[this.messageKey]);
+    const feed = {
+      session: this.terminal ? this.sessionRelative : null, notice,
+      title: this.selected ? `${this.selected.app} — ${this.selected.title || this.t.untitled}` : "",
+    };
+    const body = JSON.stringify(feed);
+    const now = Date.now();
+    if (!force && body === this.lastPipFeed && now - this.lastPipFeedAt < 2000) return;
+    setShared(this.pipFeedKey, { ...feed, at: now });
+    this.lastPipFeed = body;
+    this.lastPipFeedAt = now;
   }
 
   async writeControl(state, force = false) {
@@ -281,6 +358,7 @@ export default class WindowMonitor extends View {
   async removeSession() {
     const directory = this.sessionDirectory;
     this.sessionDirectory = null;
+    this.sessionRelative = null;
     this.file = null;
     this.previousFile = null;
     if (directory) checked(await exec("/bin/rm", ["-rf", directory]));
@@ -349,6 +427,7 @@ export default class WindowMonitor extends View {
   async stop(cx) {
     this.enabled = false;
     this.waitingForPane = false;
+    this.closePip();
     this.stopFrameTimer();
     await this.writeControl("stop", true);
     if (this.terminal) checked(await hc(["kill", this.terminal, "--json"]));
@@ -364,6 +443,8 @@ export default class WindowMonitor extends View {
     if (command === "choose") { if (this.setup === "ready") this.openPicker(); return; }
     if (command === "settings") { this.openSettings(); return; }
     if (command === "zoom-reset") { this.zoomTo(1, null, cx); return; }
+    if (command === "pip") { this.openPip(); cx.notify(); return; }
+    if (command === "unpip") { this.closePip(); cx.notify(); return; }
     // Each task gets the cx of the spawned task: a click's cx is only valid
     // during the click.
     const tasks = {
@@ -412,7 +493,8 @@ export default class WindowMonitor extends View {
     const address = this.terminal;
     cx.spawn(async (cx) => {
       try {
-        const visible = this.shown();
+        const paneVisible = this.paneShown();
+        const visible = paneVisible || this.pipOpen;
         await this.writeControl(this.enabled && visible ? "run" : "pause");
         if (this.closed || this.terminal !== address) return;
         const raw = await readTextFile(`${this.sessionDirectory}/stats.json`);
@@ -436,8 +518,9 @@ export default class WindowMonitor extends View {
         }
         const changed = messageKey !== this.messageKey;
         this.messageKey = messageKey;
-        // Frames are read by the frame timer, at the capture's frame rate.
-        this.live = visible && this.enabled;
+        // Frames are read by the frame timer, at the capture's frame rate;
+        // the floating window reads its own while it is open.
+        this.live = paneVisible && this.enabled && !this.pipId;
         if (changed && visible) cx.notify();
       } catch (e) {
         this.error = message(e);
@@ -449,14 +532,16 @@ export default class WindowMonitor extends View {
   }
 
   // Shows the helper's newest image; runs once per frame interval while live.
+  // The pane and the floating window both read the session named by
+  // sessionRelative.
   readFrame(cx) {
-    if (this.closed || this.busy || this.reading || !this.live || !this.terminal) return;
+    if (this.closed || this.busy || this.reading || !this.live || !this.sessionRelative) return;
     this.reading = true;
-    const address = this.terminal;
+    const session = this.sessionRelative;
     cx.spawn(async (cx) => {
       try {
-        const metadata = await readTextFile(`${this.sessionDirectory}/current.json`);
-        if (this.closed || this.terminal !== address || !this.live || !metadata) return;
+        const metadata = await readTextFile(`${appHome()}/${session}/current.json`);
+        if (this.closed || this.sessionRelative !== session || !this.live || !metadata) return;
         const frame = JSON.parse(metadata);
         if (frame.frame === this.frame) return;
         this.frame = frame.frame;
@@ -465,7 +550,7 @@ export default class WindowMonitor extends View {
         // The previous image stays underneath: image() paints nothing
         // while the new file loads or reloads after its change event.
         this.previousFile = this.file;
-        this.file = `${this.sessionRelative}/${frame.file.split("/").pop()}`;
+        this.file = `${session}/${frame.file.split("/").pop()}`;
         cx.notify();
       } catch (e) {
         this.error = message(e);
@@ -530,15 +615,80 @@ export default class WindowMonitor extends View {
 
   async close() {
     if (this.role === "picker") return this.closePicker();
+    if (this.role === "pip") return this.closePipView();
     if (this.role !== "pane") return;
     this.closed = true;
     this.enabled = false;
     this.stopFrameTimer();
     if (this.terminal) run("terminal.kill", { terminal: this.terminal });
+    this.closePip();
     if (this.guiPID && this.guiWindow) await this.writeControl("stop", true);
     this.claim(panes().filter((p) => p.mod === this.modName), Date.now());
     // The helper also exits once the control file is gone (lease check).
     await this.removeOwnedFiles();
+  }
+
+  // MARK: floating window
+
+  initPip(cx) {
+    this.closed = false;
+    this.reading = false;
+    this.live = false;
+    this.frameTimer = null;
+    this.sessionRelative = null;
+    this.frame = -1;
+    this.file = null;
+    this.previousFile = null;
+    this.hovered = false;
+    this.size = { width: PIP_EDGE, height: PIP_EDGE };
+    this.zoom = 1;
+    this.pan = { x: 0, y: 0 };
+    this.feed = shared(this.config.feedKey) ?? {};
+    this.seenAt = 0;
+    this.pipTick(cx);
+    cx.timer.every(500, (cx) => this.pipTick(cx));
+  }
+
+  // Follows the pane's feed: a new session starts over, no session stops
+  // reading (the last image stays, under the pane's notice). Closes itself
+  // when the pane is gone.
+  pipTick(cx) {
+    if (this.closed) return;
+    const feed = shared(this.config.feedKey);
+    if (!feed || Date.now() - feed.at > PIP_STALE_MS) {
+      this.closed = true;
+      this.stopFrameTimer();
+      closeOverlay(this.config.overlay);
+      return;
+    }
+    const changed = feed.notice !== this.feed.notice || feed.title !== this.feed.title;
+    this.feed = feed;
+    if (feed.session && feed.session !== this.sessionRelative) {
+      this.stopFrameTimer();
+      this.sessionRelative = feed.session;
+      this.frame = -1;
+      this.file = null;
+      this.previousFile = null;
+      this.zoom = 1;
+      this.pan = { x: 0, y: 0 };
+    }
+    if (!feed.session) this.stopFrameTimer();
+    else if (!this.frameTimer || this.frameTimerFPS !== this.fps) {
+      this.stopFrameTimer();
+      this.startFrameTimer(cx);
+    }
+    this.live = Boolean(feed.session);
+    if (Date.now() - this.seenAt >= 2000) {
+      this.seenAt = Date.now();
+      setShared(this.config.seenKey, { overlay: this.config.overlay, at: this.seenAt });
+    }
+    if (changed) cx.notify();
+  }
+
+  closePipView() {
+    this.closed = true;
+    this.stopFrameTimer();
+    setShared(this.config.seenKey, { overlay: this.config.overlay, at: Date.now(), closed: true });
   }
 
   // MARK: picker dialog
@@ -733,6 +883,8 @@ export default class WindowMonitor extends View {
     const c = theme();
     return div().id(id).px(12).py(7).rounded(6).flex_none()
       .bg(active ? c.solid : c.surface).text_color(active ? c.solid_foreground : enabled ? c.foreground : c.dim)
+      // In the floating window, a press on a button must not move the window.
+      .when(this.role === "pip", (el) => el.on_mouse_down("left", (_event, cx) => cx.stop_propagation()))
       .when(enabled, (el) => el.hover((s) => s.opacity(0.85)).on_click((_event, cx) => onClick(cx)))
       .child(label);
   }
@@ -875,9 +1027,58 @@ export default class WindowMonitor extends View {
     return div().text_color(c.muted).child(t.checking);
   }
 
+  // The watched image at its zoom and pan, the previous one underneath.
+  imageLayer() {
+    const { left, top, width, height } = this.imageBox();
+    return div().absolute().left(left).top(top).w(width).h(height)
+      .when(Boolean(this.previousFile), (layer) => layer.child(image(this.previousFile).absolute().inset_0().w(width).h(height)))
+      .child(image(this.file).absolute().inset_0().w(width).h(height));
+  }
+
+  // The floating window: image only, like the watching pane. A press moves
+  // the window unless the image is zoomed, when it pans the image instead.
+  renderPip() {
+    const c = theme();
+    const t = this.t;
+    const root = div().id("window-monitor-pip").relative().size_full().min_w(0).min_h(0).overflow_hidden()
+      .bg(c.background).text_color(c.foreground).text_size(13)
+      .on_size_change((size, cx) => { this.size = size; cx.notify(); })
+      .on_hover((hovered, cx) => { this.hovered = hovered; if (!hovered) this.drag = null; cx.notify(); })
+      .on_mouse_down("left", (event, cx) => {
+        if (!this.file || this.zoom === 1) return;
+        cx.stop_propagation();
+        this.drag = event.position;
+        if (event.click_count === 2) this.zoomTo(1, null, cx);
+      })
+      .on_mouse_up("left", () => { this.drag = null; });
+    if (this.file) {
+      root.on_scroll_wheel((event, cx) => this.scrollImage(event, cx))
+        .on_mouse_move((event, cx) => this.dragImage(event, cx))
+        .child(this.imageLayer());
+    } else {
+      root.child(v_flex().size_full().items_center().justify_center().child(div().text_color(c.muted).child(t.waiting)));
+    }
+    // As in the pane, a frozen image is never left without its notice.
+    if (this.feed.notice) {
+      root.child(div().absolute().left(8).bottom(8).px(8).py(4).rounded(6).bg(c.popover)
+        .text_color(c.foreground).child(this.feed.notice));
+    }
+    if (this.file && this.zoom > 1) {
+      root.child(div().absolute().right(8).bottom(8).child(
+        this.button("zoom-reset", t.zoomFit(Math.round(this.zoom * 100)), true, (cx) => this.zoomTo(1, null, cx))));
+    }
+    if (this.hovered) {
+      root.child(h_flex().absolute().top(0).left(0).right(0).px(8).py(6).gap(8).items_center().bg(c.popover)
+        .child(div().flex_1().min_w(0).truncate().child(this.feed.title ?? ""))
+        .child(this.button("unpip", t.unpip, true, () => closeOverlay(this.config.overlay))));
+    }
+    return root;
+  }
+
   render(cx) {
     if (this.role === "picker") return this.renderPicker();
     if (this.role === "settings") return this.renderSettings();
+    if (this.role === "pip") return this.renderPip();
     const c = theme();
     const t = this.t;
     const root = div().id("window-monitor").relative().size_full().min_w(0).min_h(0).overflow_hidden()
@@ -902,15 +1103,23 @@ export default class WindowMonitor extends View {
           .child(this.button("choose", t.choose, !this.busy, (cx) => this.action("choose", cx), true))
           .child(this.button("settings", t.settings, true, (cx) => this.action("settings", cx)))));
     }
+    // In the floating window: the pane only says so and keeps the controls,
+    // at its top, clear of the window, which first opens in the middle.
+    if (this.pipId) {
+      return root.child(v_flex().p(16).gap(10).items_start()
+        .child(div().text_color(this.error ? c.blocked : c.muted).child(this.error || t.inPip))
+        .child(h_flex().gap(8)
+          .child(this.button("unpip", t.unpip, !this.busy, (cx) => this.action("unpip", cx), true))
+          .child(this.button("stop", t.stop, !this.busy, (cx) => this.action("stop", cx)))
+          .child(this.button("choose", t.change, !this.busy, (cx) => this.action("choose", cx)))
+          .child(this.button("settings", t.settings, true, (cx) => this.action("settings", cx)))));
+    }
     // Watching: the image fills the pane; controls appear while the pointer is over it.
     root.on_hover((hovered, cx) => { this.hovered = hovered; if (!hovered) this.drag = null; cx.notify(); });
     if (this.file) {
-      const { left, top, width, height } = this.imageBox();
       root.on_scroll_wheel((event, cx) => this.scrollImage(event, cx))
         .on_mouse_move((event, cx) => this.dragImage(event, cx))
-        .child(div().absolute().left(left).top(top).w(width).h(height)
-          .when(Boolean(this.previousFile), (layer) => layer.child(image(this.previousFile).absolute().inset_0().w(width).h(height)))
-          .child(image(this.file).absolute().inset_0().w(width).h(height)));
+        .child(this.imageLayer());
     } else {
       root.child(v_flex().size_full().items_center().justify_center().child(div().text_color(c.muted).child(t.waiting)));
     }
@@ -929,6 +1138,7 @@ export default class WindowMonitor extends View {
       root.child(h_flex().absolute().top(0).left(0).right(0).px(12).py(8).gap(8).items_center().bg(c.popover)
         .child(div().flex_1().min_w(0).truncate().child(`${this.selected.app} — ${this.selected.title || t.untitled}`))
         .child(this.button("stop", t.stop, !this.busy, (cx) => this.action("stop", cx)))
+        .child(this.button("pip", t.pip, !this.busy && Boolean(this.pane), (cx) => this.action("pip", cx)))
         .child(this.button("choose", t.change, !this.busy, (cx) => this.action("choose", cx)))
         .child(this.button("settings", t.settings, true, (cx) => this.action("settings", cx))));
     }
