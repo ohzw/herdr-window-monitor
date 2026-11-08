@@ -1,4 +1,4 @@
-.bin/
 .DS_Store
-jsconfig.json
-*.d.ts
+.bin/
+mods/*/gpui-kit.d.ts
+mods/*/jsconfig.json

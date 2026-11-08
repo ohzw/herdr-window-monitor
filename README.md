@@ -73,3 +73,5 @@ Herdr asks agents to tell you this before adding a mod.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Icons are from Lucide. See the bundled [LICENSE-Lucide.txt](mods/window-monitor/icons/LICENSE-Lucide.txt) for the ISC license.

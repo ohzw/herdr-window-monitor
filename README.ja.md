@@ -73,3 +73,5 @@ Herdrは、Modを追加する前にこの内容を利用者へ伝えるよう、
 ## ライセンス
 
 MIT。[LICENSE](LICENSE) を参照してください。
+
+アイコンはLucideのものです。ISCライセンスは同梱の [LICENSE-Lucide.txt](mods/window-monitor/icons/LICENSE-Lucide.txt) を参照してください。
