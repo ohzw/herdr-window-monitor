@@ -27,6 +27,7 @@ Requirements: macOS 14 or later, Herdr 0.1.13 (the version this was tested with)
 
 - When the pane is ready, a dialog shows your windows as cards with a current thumbnail of each, refreshed every 2 seconds while the dialog is open. Pick one and press **Start**, or double-click a card. The window you watched last time is preselected; capture never starts without pressing Start (or double-clicking).
 - While watching, the pane shows only the picture. Move the pointer over it for the bar: **Stop**, **Other window**, **Settings**.
+- Zoom with a two-finger scroll on the trackpad (or the mouse wheel), no key needed, up to 800 %, around the pointer. While zoomed, drag the picture to move it. Double-click the picture, or press the **<zoom> % · Fit** button at bottom right, to fit it again. The picture is captured at most 1280 px on its long side, so high zoom gets blurry. Trackpad pinch isn't available: Herdr doesn't pass pinch gestures to mods.
 - A notice stays on the picture whenever it isn't live (paused, ended, the window was closed), so a frozen image can't pass for a live one.
 - Capture pauses while the pane is in another tab or Herdr is minimized, and resumes when it shows again. Closing the pane stops it and deletes its images.
 - One window per pane. Open more panes to watch more windows; a window already watched in another pane is shown as such and can't be picked twice.

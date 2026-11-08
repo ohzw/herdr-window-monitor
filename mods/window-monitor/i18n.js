@@ -49,6 +49,7 @@ export const text = {
     delaySmooth: "250 ms · less flicker",
     delayBody: "0 ms shows each image as soon as it is ready, but now and then the picture can go blank for an instant or jump back to the previous image. 250 ms avoided both in short tests, at the cost of about 0.3 s more delay. It is a timing workaround, not a guarantee. Applies the next time a capture starts.",
     delayFixed: "Set by props.publishDelayMs for this pane.",
+    zoomFit: (percent) => `${percent}% · Fit`,
   },
   ja: {
     checking: "helperを確認しています…",
@@ -98,5 +99,6 @@ export const text = {
     delaySmooth: "250 ms・ちらつき軽減",
     delayBody: "0 msは画像ができしだい表示しますが、ときどき一瞬空白になったり、1つ前の画像に戻ったりします。250 msは短い試験ではどちらも起きませんでしたが、表示が約0.3秒遅れます。タイミングに頼った軽減策で、保証ではありません。次に取得を開始したときから反映します。",
     delayFixed: "このPaneでは props.publishDelayMs で固定されています。",
+    zoomFit: (percent) => `${percent}%・全体表示`,
   },
 };

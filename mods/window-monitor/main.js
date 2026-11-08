@@ -15,6 +15,8 @@ const THUMBNAIL_REFRESH_MS = 2000;
 // Frame rates the settings offer (the helper's --fps); 2 is the default.
 const FPS_CHOICES = [1, 2, 5, 10, 20];
 const DEFAULT_FPS = 2;
+// The watched image zooms from 1 (fits the pane) up to this many times.
+const MAX_ZOOM = 8;
 
 // Removes frame folders left by copies whose Herdr process is gone (crash or
 // forced quit: their close() never ran). Live copies, in this or another
@@ -104,6 +106,8 @@ export default class WindowMonitor extends View {
     this.lastControl = "";
     this.lastHeartbeat = 0;
     this.size = { width: 640, height: 480 };
+    this.zoom = 1;
+    this.pan = { x: 0, y: 0 };
     this.bindPane();
     cx.spawn(async (cx) => {
       try {
@@ -283,6 +287,8 @@ export default class WindowMonitor extends View {
     this.sessionDirectory = `${appHome()}/${this.sessionRelative}`;
     checked(await exec("/bin/mkdir", ["-p", this.sessionDirectory]));
     this.frame = -1;
+    this.zoom = 1;
+    this.pan = { x: 0, y: 0 };
     this.enabled = true;
     await this.writeControl(this.shown() ? "run" : "pause", true);
     const result = JSON.parse(checked(await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--",
@@ -324,6 +330,7 @@ export default class WindowMonitor extends View {
     if (this.closed || this.busy) return;
     if (command === "choose") { if (this.setup === "ready") this.openPicker(); return; }
     if (command === "settings") { this.openSettings(); return; }
+    if (command === "zoom-reset") { this.zoomTo(1, null, cx); return; }
     // Each task gets the cx of the spawned task: a click's cx is only valid
     // during the click.
     const tasks = {
@@ -429,6 +436,58 @@ export default class WindowMonitor extends View {
         this.reading = false;
       }
     });
+  }
+
+  // Where the watched image is drawn: fitted to the pane, scaled by the zoom,
+  // moved by the pan. A zoomed image always covers the pane on an axis where
+  // it is larger, and stays centered on one where it is smaller.
+  imageBox() {
+    const ratio = (this.imageWidth ?? 1280) / (this.imageHeight ?? 800);
+    const { width: paneWidth, height: paneHeight } = this.size;
+    const width = Math.max(40, Math.min(paneWidth, paneHeight * ratio)) * this.zoom;
+    const height = width / ratio;
+    const slackX = Math.max(0, (width - paneWidth) / 2);
+    const slackY = Math.max(0, (height - paneHeight) / 2);
+    this.pan = {
+      x: Math.min(slackX, Math.max(-slackX, this.pan.x)),
+      y: Math.min(slackY, Math.max(-slackY, this.pan.y)),
+    };
+    return {
+      left: (paneWidth - width) / 2 + this.pan.x, top: (paneHeight - height) / 2 + this.pan.y, width, height,
+    };
+  }
+
+  // Zooms keeping the image point under `at` (pane coordinates) in place;
+  // without a point, around the pane's center.
+  zoomTo(zoom, at, cx) {
+    zoom = Math.min(MAX_ZOOM, Math.max(1, zoom));
+    if (zoom === this.zoom) return;
+    const before = this.imageBox();
+    const point = at ?? { x: this.size.width / 2, y: this.size.height / 2 };
+    const u = (point.x - before.left) / before.width;
+    const v = (point.y - before.top) / before.height;
+    this.zoom = zoom;
+    const after = this.imageBox();
+    this.pan = {
+      x: point.x - u * after.width - (this.size.width - after.width) / 2,
+      y: point.y - v * after.height - (this.size.height - after.height) / 2,
+    };
+    cx.notify();
+  }
+
+  // A two-finger scroll (or a wheel) zooms at the pointer, no key needed.
+  scrollImage(event, cx) {
+    this.zoomTo(this.zoom * Math.exp(event.delta.y * 0.005), event.local_position ?? null, cx);
+    cx.stop_propagation();
+  }
+
+  // Dragging with the left button moves a zoomed image. The pane only hears
+  // moves while the pointer is over it, so leaving it ends the drag.
+  dragImage(event, cx) {
+    if (!this.drag || this.zoom === 1) return;
+    this.pan = { x: this.pan.x + event.position.x - this.drag.x, y: this.pan.y + event.position.y - this.drag.y };
+    this.drag = event.position;
+    cx.notify();
   }
 
   async close() {
@@ -682,7 +741,12 @@ export default class WindowMonitor extends View {
     const root = div().id("window-monitor").relative().size_full().min_w(0).min_h(0).overflow_hidden()
       .bg(c.background).text_color(c.foreground).text_size(13)
       .on_size_change((size, cx) => { this.size = size; cx.notify(); })
-      .on_mouse_down("left", (_event, cx) => this.learnPane(cx));
+      .on_mouse_down("left", (event, cx) => {
+        this.learnPane(cx);
+        this.drag = event.position;
+        if (event.click_count === 2 && this.terminal) this.zoomTo(1, null, cx);
+      })
+      .on_mouse_up("left", () => { this.drag = null; });
     const centered = (child) => root.child(v_flex().size_full().p(16).gap(10).items_center().justify_center().child(child));
     if (this.setup !== "ready") {
       return centered(v_flex().gap(10).items_center()
@@ -697,15 +761,14 @@ export default class WindowMonitor extends View {
           .child(this.button("settings", t.settings, true, (cx) => this.action("settings", cx)))));
     }
     // Watching: the image fills the pane; controls appear while the pointer is over it.
-    root.on_hover((hovered, cx) => { this.hovered = hovered; cx.notify(); });
+    root.on_hover((hovered, cx) => { this.hovered = hovered; if (!hovered) this.drag = null; cx.notify(); });
     if (this.file) {
-      const ratio = (this.imageWidth ?? 1280) / (this.imageHeight ?? 800);
-      const width = Math.max(40, Math.min(this.size.width, this.size.height * ratio));
-      const height = width / ratio;
-      root.child(h_flex().size_full().items_center().justify_center()
-        .child(div().relative().w(width).h(height)
+      const { left, top, width, height } = this.imageBox();
+      root.on_scroll_wheel((event, cx) => this.scrollImage(event, cx))
+        .on_mouse_move((event, cx) => this.dragImage(event, cx))
+        .child(div().absolute().left(left).top(top).w(width).h(height)
           .when(Boolean(this.previousFile), (layer) => layer.child(image(this.previousFile).absolute().inset_0().w(width).h(height)))
-          .child(image(this.file).absolute().inset_0().w(width).h(height))));
+          .child(image(this.file).absolute().inset_0().w(width).h(height)));
     } else {
       root.child(v_flex().size_full().items_center().justify_center().child(div().text_color(c.muted).child(t.waiting)));
     }
@@ -715,6 +778,10 @@ export default class WindowMonitor extends View {
     if (notice) {
       root.child(div().absolute().left(12).bottom(12).px(10).py(6).rounded(6).bg(c.popover)
         .text_color(this.error ? c.blocked : c.foreground).child(notice));
+    }
+    if (this.file && this.zoom > 1) {
+      root.child(div().absolute().right(12).bottom(12).child(
+        this.button("zoom-reset", t.zoomFit(Math.round(this.zoom * 100)), true, (cx) => this.zoomTo(1, null, cx))));
     }
     if (this.hovered) {
       root.child(h_flex().absolute().top(0).left(0).right(0).px(12).py(8).gap(8).items_center().bg(c.popover)
