@@ -17,6 +17,9 @@ const FPS_CHOICES = [1, 2, 5, 10, 20];
 const DEFAULT_FPS = 2;
 // The watched image zooms from 1 (fits the pane) up to this many times.
 const MAX_ZOOM = 8;
+// The settings dialog samples load this often and graphs this many samples.
+const LOAD_SAMPLE_MS = 1000;
+const LOAD_SAMPLES = 60;
 
 // Removes frame folders left by copies whose Herdr process is gone (crash or
 // forced quit: their close() never ran). Live copies, in this or another
@@ -33,6 +36,24 @@ for d in "$1"-feed-*; do
   else [ -n "$(find "$d" -maxdepth 0 -mmin -1)" ] && continue; fi
   rm -rf "$d"
 done`;
+
+// One load sample for the settings dialog: $1 the pane's feed folder, $2 the
+// Herdr PID. Prints the helper PID (0 when absent), then `pid cputime rss`
+// per process, then the helper's PNG bytes written so far. The helper is found
+// by its --png-dir, which lies under this pane's feed folder.
+const LOAD_SAMPLE = `
+h=$(/usr/bin/pgrep -f -- "$1/frames-" | /usr/bin/head -n 1)
+echo "pid \${h:-0}"
+/bin/ps -o pid=,time=,rss= -p "$2\${h:+,$h}"
+for f in "$1"/frames-*/stats.json; do
+  [ -f "$f" ] && /usr/bin/sed -n 's/^ *"out_bytes" : \\([0-9]*\\).*/out \\1/p' "$f"
+done
+true`;
+
+// ps cputime ("M:SS.ss" or "H:MM:SS") in seconds.
+function cpuSeconds(time) {
+  return time.split(":").reduce((total, part) => total * 60 + Number(part), 0);
+}
 
 function checked(result) {
   if (result.code !== 0) throw new Error(result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`);
@@ -163,8 +184,11 @@ export default class WindowMonitor extends View {
 
   openSettings() {
     openOverlay({
-      mod: this.modName, kind: "dialog", width: 520, height: 440,
-      props: { role: "settings", lang: this.lang, fixed: this.config.publishDelayMs ?? null },
+      mod: this.modName, kind: "dialog", width: 520, height: 540,
+      props: {
+        role: "settings", lang: this.lang, fixed: this.config.publishDelayMs ?? null,
+        feed: this.directory, guiPID: this.guiPID,
+      },
     });
   }
 
@@ -617,6 +641,14 @@ export default class WindowMonitor extends View {
   // MARK: settings dialog
 
   initSettings(cx) {
+    this.load = { helper: [], herdr: [], write: [] };
+    this.helperMemory = null;
+    this.lastSample = null;
+    this.sampling = false;
+    if (this.config.feed && this.config.guiPID) {
+      this.sampleLoad(cx);
+      cx.timer.every(LOAD_SAMPLE_MS, (cx) => this.sampleLoad(cx));
+    }
     cx.spawn(async () => {
       for (;;) {
         const command = await nextCommand();
@@ -625,6 +657,58 @@ export default class WindowMonitor extends View {
         } else if (command.startsWith("fps-") && FPS_CHOICES.includes(Number(command.slice(4)))) {
           this.saveSettings({ fps: Number(command.slice(4)) });
         } else if (command === "close") closeOverlay(this.config.overlay);
+      }
+    });
+  }
+
+  // CPU is the change in each process's CPU time over the wall time since the
+  // last sample (one core = 100 %); a process that changed PID has no value.
+  sampleLoad(cx) {
+    if (this.sampling) return;
+    this.sampling = true;
+    cx.spawn(async (cx) => {
+      try {
+        const out = checked(await exec("/bin/sh", ["-c", LOAD_SAMPLE, "sh", this.config.feed, String(this.config.guiPID)]));
+        const now = Date.now();
+        const lines = out.trim().split("\n");
+        const helperPID = Number(lines[0].split(/\s+/)[1]);
+        const procs = new Map();
+        let written = null;
+        for (const line of lines.slice(1)) {
+          const parts = line.trim().split(/\s+/);
+          if (parts[0] === "out") written = Number(parts[1]);
+          else if (parts.length === 3) procs.set(Number(parts[0]), { cpu: cpuSeconds(parts[1]), rss: Number(parts[2]) });
+        }
+        const sample = { at: now, pids: { helper: helperPID, herdr: this.config.guiPID }, procs, written };
+        const last = this.lastSample;
+        const seconds = last ? (now - last.at) / 1000 : 0;
+        const cpu = (key) => {
+          const pid = sample.pids[key];
+          const before = last?.pids[key] === pid ? last.procs.get(pid) : null;
+          const after = procs.get(pid);
+          return before && after && seconds > 0 ? Math.max(0, (after.cpu - before.cpu) / seconds * 100) : null;
+        };
+        const push = (key, value) => {
+          const series = this.load[key];
+          series.push(value);
+          if (series.length > LOAD_SAMPLES) series.shift();
+        };
+        if (last) {
+          push("helper", cpu("helper"));
+          push("herdr", cpu("herdr"));
+          // A new capture starts its byte count from zero again.
+          push("write", written != null && last.written != null && written >= last.written && seconds > 0
+            ? (written - last.written) / seconds / 1024 : null);
+        }
+        const rss = procs.get(helperPID)?.rss;
+        this.helperMemory = rss ? rss / 1024 : null;
+        this.lastSample = sample;
+        cx.notify();
+      } catch (_) {
+        // A missed sample leaves a gap; the next one starts fresh.
+        this.lastSample = null;
+      } finally {
+        this.sampling = false;
       }
     });
   }
@@ -694,6 +778,48 @@ export default class WindowMonitor extends View {
         .child(`${w.title || t.untitled} · ${Math.round(w.width)}×${Math.round(w.height)}${taken ? t.watchedElsewhere : ""}`));
   }
 
+  // One graphed measure: label, a thin bar per sample (scaled to the larger
+  // of `floor` and the highest sample), and the latest value. Hovering the
+  // row explains what it measures.
+  loadRow(id, label, hint, series, floor, value) {
+    const c = theme();
+    const top = Math.max(floor, ...series.filter((v) => v != null));
+    const height = 12;
+    const bars = Array.from({ length: LOAD_SAMPLES }, (_, i) => series[i - (LOAD_SAMPLES - series.length)] ?? null);
+    return h_flex().id(id).gap(8).items_center().tooltip(hint)
+      .child(div().w(88).flex_none().truncate().text_color(c.muted).child(label))
+      .child(h_flex().flex_1().h(height).items_end().gap(1)
+        .children(bars.map((v) => div().flex_1().h(v == null ? 0 : Math.max(1, (v / top) * height))
+          .bg(c.accent ?? c.solid))))
+      .child(div().w(112).flex_none().text_right().child(value));
+  }
+
+  // Load of the last minute in one small card: CPU of the capture helper and
+  // of Herdr, and image bytes saved per second.
+  loadCard() {
+    const c = theme();
+    const t = this.t;
+    const latest = (series, format) => (series.at(-1) == null ? "—" : format(series.at(-1)));
+    const cpu = (v) => `CPU ${v.toFixed(1)}%`;
+    return v_flex().gap(4).px(10).py(8).rounded(6).bg(c.surface).text_size(12)
+      .child(this.loadRow("load-capture", t.loadCapture, t.loadCaptureHint, this.load.helper, 10, latest(this.load.helper, cpu)))
+      .child(this.loadRow("load-herdr", t.loadHerdr, t.loadHerdrHint, this.load.herdr, 10, latest(this.load.herdr, cpu)))
+      .child(this.loadRow("load-save", t.loadSave, t.loadSaveHint, this.load.write, 100,
+        latest(this.load.write, (v) => `${v < 10 ? v.toFixed(1) : Math.round(v)}KB/s`)));
+  }
+
+  // The load heading, with the capture helper's current memory at its right
+  // (a number only: it barely changes, so it gets no graph).
+  loadHeading() {
+    const c = theme();
+    const t = this.t;
+    const memory = this.helperMemory == null ? "—" : `${Math.round(this.helperMemory)}MB`;
+    return h_flex().items_center().gap(8)
+      .child(div().flex_1().font_semibold().text_size(15).child(t.loadTitle))
+      .child(div().id("load-memory").text_size(12).text_color(c.muted).tooltip(t.loadMemoryHint)
+        .child(t.loadMemory(memory)));
+  }
+
   renderSettings() {
     const c = theme();
     const t = this.t;
@@ -709,6 +835,8 @@ export default class WindowMonitor extends View {
         .child(this.button("delay-0", t.delayFast, !fixed, () => this.saveSettings({ delayMs: 0 }), delay === 0))
         .child(this.button("delay-250", t.delaySmooth, !fixed, () => this.saveSettings({ delayMs: 250 }), delay === 250)))
       .child(div().text_color(c.muted).child(fixed ? t.delayFixed : t.delayBody))
+      .child(this.loadHeading())
+      .child(this.loadCard())
       .child(div().flex_1())
       .child(h_flex().justify_end().child(this.button("close", t.close, true, () => closeOverlay(this.config.overlay))));
   }

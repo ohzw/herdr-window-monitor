@@ -47,11 +47,15 @@ Herdr has no way to tell a mod that a new image has finished loading, so switchi
 
 The setting applies the next time a capture starts. The language follows macOS (Japanese or English).
 
+### Settings: load
+
+While Settings is open, a small card graphs the last minute, sampled every second: **Capture**, the CPU of this pane's helper process; **Herdr (all)**, the CPU of the whole Herdr app, which includes showing the images; and **Image saving**, the PNG bytes written per second. One core = 100 %. The helper's current memory is shown as a number at the right of the heading. Hover a row for what it measures. Without a running capture, the Capture values show "—".
+
 ## What it does on your Mac
 
 Herdr asks agents to tell you this before adding a mod.
 
-- **Runs programs:** its own helper (`.bin/window-monitor-helper`, built from the included source), started as a background terminal with `hc run`; a copy of it, `.bin/window-monitor-lister`, that lists windows and takes their thumbnails for the dialog; `/bin/sh`, `mkdir`, `rm`, `test`, `defaults read -g AppleLanguages`, `open` (System Settings), and `helper/build.sh` when you press Build helper.
+- **Runs programs:** its own helper (`.bin/window-monitor-helper`, built from the included source), started as a background terminal with `hc run`; a copy of it, `.bin/window-monitor-lister`, that lists windows and takes their thumbnails for the dialog; `/bin/sh`, `mkdir`, `rm`, `test`, `defaults read -g AppleLanguages`, `open` (System Settings), and `helper/build.sh` when you press Build helper. While Settings is open, once a second: `pgrep`, `head`, `ps` and `sed` for the load card.
 - **Reads and writes outside its folder:** `~/.config/herdr-app/mods/window-monitor-feed-<id>/` for each open pane: a control file, the helper's stats, the newest three or four PNG frames (1280 px at most, at the frame rate set in Settings: 2 per second by default, 20 at most) and, while the window dialog is open, the newest two sets of thumbnails (480 px at most). Stopping deletes the frames; closing the dialog deletes its thumbnails; closing the pane deletes the folder. Folders no live pane has touched for a minute (left by a crash, or by a pane dropped when the mod was updated) are deleted when a pane opens. Inside its folder: `.bin/window-monitor-lister.lock`, so two listings never run at once.
 - **Network:** none.
 - **Captures:** while the window dialog is open, a still image of every window it lists, every 2 seconds; otherwise only the window you picked, and only while its pane is visible.
