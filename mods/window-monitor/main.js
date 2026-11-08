@@ -1,4 +1,4 @@
-import { View, div, image } from "gpui-kit";
+import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import {
   appHome, closeOverlay, exec, focused, hc, nextCommand, openOverlay, panes, props, readTextFile, run,
@@ -889,6 +889,45 @@ export default class WindowMonitor extends View {
       .child(label);
   }
 
+  icon(name) {
+    return `mods/${this.modName}/icons/${name}.svg`;
+  }
+
+  // A Lucide icon from the mod's icons/ folder, for the hover header; the
+  // label shows as a tooltip and is what a screen reader announces.
+  iconButton(id, icon, label, enabled, onClick) {
+    const c = theme();
+    return h_flex().id(id).size(24).flex_none().items_center().justify_center().rounded(4)
+      .text_color(enabled ? c.muted : c.dim).tooltip(label).accessibility_label(label)
+      .when(this.role === "pip", (el) => el.on_mouse_down("left", (_event, cx) => cx.stop_propagation()))
+      .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(c.hover).text_color(c.foreground))
+        .on_click((_event, cx) => onClick(cx)))
+      .child(svg(this.icon(icon)).size(14));
+  }
+
+  // Icon and label: `solid` when primary, else outlined.
+  labeledButton(id, icon, label, enabled, onClick, primary = false) {
+    const c = theme();
+    return h_flex().id(id).h(28).px(10).gap(6).flex_none().items_center().rounded(6).text_size(12)
+      .when(primary, (el) => el.bg(c.solid).text_color(c.solid_foreground))
+      .when(!primary, (el) => el.border_1().border_color(c.border).text_color(c.foreground))
+      .when(!enabled, (el) => el.opacity(0.5))
+      .when(enabled, (el) => el.cursor_pointer()
+        .hover((s) => primary ? s.opacity(0.85) : s.bg(c.hover))
+        .on_click((_event, cx) => onClick(cx)))
+      .child(svg(this.icon(icon)).size(14).flex_none())
+      .child(label);
+  }
+
+  // The bar over the image while the pointer is on it: title, then icon buttons.
+  hoverHeader(title, ...buttons) {
+    const c = theme();
+    return h_flex().absolute().top(0).left(0).right(0).pl(10).pr(4).py(2).gap(2).items_center()
+      .bg(c.popover).text_size(12)
+      .child(div().flex_1().min_w(0).mr(4).truncate().text_color(c.muted).child(title))
+      .children(buttons);
+  }
+
   renderPicker() {
     const c = theme();
     const t = this.t;
@@ -1068,9 +1107,8 @@ export default class WindowMonitor extends View {
         this.button("zoom-reset", t.zoomFit(Math.round(this.zoom * 100)), true, (cx) => this.zoomTo(1, null, cx))));
     }
     if (this.hovered) {
-      root.child(h_flex().absolute().top(0).left(0).right(0).px(8).py(6).gap(8).items_center().bg(c.popover)
-        .child(div().flex_1().min_w(0).truncate().child(this.feed.title ?? ""))
-        .child(this.button("unpip", t.unpip, true, () => closeOverlay(this.config.overlay))));
+      root.child(this.hoverHeader(this.feed.title ?? "",
+        this.iconButton("unpip", "minimize-2", t.unpip, true, () => closeOverlay(this.config.overlay))));
     }
     return root;
   }
@@ -1103,16 +1141,22 @@ export default class WindowMonitor extends View {
           .child(this.button("choose", t.choose, !this.busy, (cx) => this.action("choose", cx), true))
           .child(this.button("settings", t.settings, true, (cx) => this.action("settings", cx)))));
     }
-    // In the floating window: the pane only says so and keeps the controls,
-    // at its top, clear of the window, which first opens in the middle.
+    // In the floating window: the pane says what it shows and where, and keeps
+    // the controls at its top, clear of the window, which first opens in the middle.
     if (this.pipId) {
-      return root.child(v_flex().p(16).gap(10).items_start()
-        .child(div().text_color(this.error ? c.blocked : c.muted).child(this.error || t.inPip))
-        .child(h_flex().gap(8)
-          .child(this.button("unpip", t.unpip, !this.busy, (cx) => this.action("unpip", cx), true))
-          .child(this.button("stop", t.stop, !this.busy, (cx) => this.action("stop", cx)))
-          .child(this.button("choose", t.change, !this.busy, (cx) => this.action("choose", cx)))
-          .child(this.button("settings", t.settings, true, (cx) => this.action("settings", cx)))));
+      const label = `${this.selected.app} — ${this.selected.title || t.untitled}`;
+      return root.child(v_flex().p(16).gap(12).items_start()
+        .child(h_flex().w_full().gap(10).items_center()
+          .child(h_flex().size(32).flex_none().items_center().justify_center().rounded(8).bg(c.surface)
+            .text_color(c.accent).child(svg(this.icon("picture-in-picture-2")).size(16)))
+          .child(v_flex().flex_1().min_w(0).gap(2)
+            .child(div().font_medium().truncate().child(t.inPip))
+            .child(div().text_size(12).truncate().text_color(this.error ? c.blocked : c.muted).child(this.error || label))))
+        .child(h_flex().flex_wrap().gap(6).items_center()
+          .child(this.labeledButton("unpip", "minimize-2", t.unpip, !this.busy, (cx) => this.action("unpip", cx), true))
+          .child(this.labeledButton("choose", "app-window", t.change, !this.busy, (cx) => this.action("choose", cx)))
+          .child(this.labeledButton("settings", "settings", t.settings, true, (cx) => this.action("settings", cx)))
+          .child(this.labeledButton("stop", "circle-stop", t.stop, !this.busy, (cx) => this.action("stop", cx)))));
     }
     // Watching: the image fills the pane; controls appear while the pointer is over it.
     root.on_hover((hovered, cx) => { this.hovered = hovered; if (!hovered) this.drag = null; cx.notify(); });
@@ -1135,12 +1179,11 @@ export default class WindowMonitor extends View {
         this.button("zoom-reset", t.zoomFit(Math.round(this.zoom * 100)), true, (cx) => this.zoomTo(1, null, cx))));
     }
     if (this.hovered) {
-      root.child(h_flex().absolute().top(0).left(0).right(0).px(12).py(8).gap(8).items_center().bg(c.popover)
-        .child(div().flex_1().min_w(0).truncate().child(`${this.selected.app} — ${this.selected.title || t.untitled}`))
-        .child(this.button("stop", t.stop, !this.busy, (cx) => this.action("stop", cx)))
-        .child(this.button("pip", t.pip, !this.busy && Boolean(this.pane), (cx) => this.action("pip", cx)))
-        .child(this.button("choose", t.change, !this.busy, (cx) => this.action("choose", cx)))
-        .child(this.button("settings", t.settings, true, (cx) => this.action("settings", cx))));
+      root.child(this.hoverHeader(`${this.selected.app} — ${this.selected.title || t.untitled}`,
+        this.iconButton("stop", "circle-stop", t.stop, !this.busy, (cx) => this.action("stop", cx)),
+        this.iconButton("pip", "picture-in-picture-2", t.pip, !this.busy && Boolean(this.pane), (cx) => this.action("pip", cx)),
+        this.iconButton("choose", "app-window", t.change, !this.busy, (cx) => this.action("choose", cx)),
+        this.iconButton("settings", "settings", t.settings, true, (cx) => this.action("settings", cx))));
     }
     return root;
   }
