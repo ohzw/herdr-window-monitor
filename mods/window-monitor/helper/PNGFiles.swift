@@ -1,6 +1,8 @@
 // Publishes each frame under a new name (frame-N.png) and then metadata
-// (current.json) that names it. The newest two images are kept so the mod can
-// keep the previous one underneath the new one while it loads.
+// (current.json) that names it. The newest three images are kept so the mod
+// can keep the previous one it showed underneath the new one while it loads,
+// even when it skipped one frame (at high frame rates it reads about as often
+// as frames arrive).
 //
 // publishDelay waits between the PNG's atomic rename and the metadata update.
 // It does NOT confirm that Herdr finished loading or invalidating an image (no
@@ -58,7 +60,7 @@ final class PNGFiles {
             } catch { return false }
         }
         guard published else { return false }
-        if retained.count > 2 { unlink(retained.removeFirst()) }
+        if retained.count > 3 { unlink(retained.removeFirst()) }
         frame += 1
         return true
     }

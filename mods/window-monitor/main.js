@@ -13,7 +13,7 @@ const SCREEN_RECORDING_SETTINGS = "x-apple.systempreferences:com.apple.preferenc
 // How often the open picker re-lists windows and retakes their thumbnails.
 const THUMBNAIL_REFRESH_MS = 2000;
 // Frame rates the settings offer (the helper's --fps); 2 is the default.
-const FPS_CHOICES = [1, 2, 5, 10];
+const FPS_CHOICES = [1, 2, 5, 10, 20];
 const DEFAULT_FPS = 2;
 
 // Removes frame folders left by copies whose Herdr process is gone (crash or
