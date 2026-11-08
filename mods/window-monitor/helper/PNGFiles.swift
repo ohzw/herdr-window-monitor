@@ -4,23 +4,21 @@
 // even when it skipped one frame (at high frame rates it reads about as often
 // as frames arrive).
 //
-// publishDelay waits between the PNG's atomic rename and the metadata update.
-// It does NOT confirm that Herdr finished loading or invalidating an image (no
+// delay waits between the PNG's atomic rename and the metadata update. It
+// does NOT confirm that Herdr finished loading or invalidating an image (no
 // public API reports that); it only moves the announcement later. 0 = at once.
 import Foundation
 import Darwin
 
 final class PNGFiles {
     let directory: String
-    let publishDelay: TimeInterval
     private let metrics: StageMetrics?
     private let lock = NSLock()
     private var frame = 0
     private var retained: [String] = []
 
-    init(directory: String, publishDelay: TimeInterval, metrics: StageMetrics? = nil) throws {
+    init(directory: String, metrics: StageMetrics? = nil) throws {
         self.directory = directory
-        self.publishDelay = publishDelay
         self.metrics = metrics
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
     }
@@ -28,7 +26,7 @@ final class PNGFiles {
     private var temporary: String { directory + "/.frame.new" }
     private var metadata: String { directory + "/current.json" }
 
-    func publish(_ bytes: [UInt8], width: Int, height: Int) -> Bool {
+    func publish(_ bytes: [UInt8], width: Int, height: Int, delay: TimeInterval) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         let path = directory + "/frame-\(frame).png"
@@ -50,7 +48,7 @@ final class PNGFiles {
         }
         guard success, measure(.rename, { rename(temporary, path) == 0 }) else { return false }
         retained.append(path)
-        if publishDelay > 0 { Thread.sleep(forTimeInterval: publishDelay) }
+        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         let published = measure(.metadataPublish) {
             let metadata: [String: Any] = ["frame": frame, "file": path, "width": width, "height": height]
             do {

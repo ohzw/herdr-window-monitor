@@ -12,7 +12,7 @@ const INSTALLED_AS = /\/mods\/([^/]+)\/main\.js/.exec(new Error().stack ?? "")?.
 const SCREEN_RECORDING_SETTINGS = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 // How often the open picker re-lists windows and retakes their thumbnails.
 const THUMBNAIL_REFRESH_MS = 2000;
-// Frame rates the settings offer (the helper's --fps); 2 is the default.
+// Frame rates the settings offer (the helper's fps); 2 is the default.
 const FPS_CHOICES = [1, 2, 5, 10, 20];
 const DEFAULT_FPS = 2;
 // The watched image zooms from 1 (fits the pane) up to this many times.
@@ -265,7 +265,10 @@ export default class WindowMonitor extends View {
 
   async writeControl(state, force = false) {
     if (!this.guiPID || !this.guiWindow) return;
-    const body = `state=${state}\ngui_pid=${this.guiPID}\ngui_window=${this.guiWindow}\nowner=${this.instance}\n`;
+    // fps and publish_delay_ms reach a running helper here, so settings
+    // changes apply within one poll.
+    const body = `state=${state}\ngui_pid=${this.guiPID}\ngui_window=${this.guiWindow}\nowner=${this.instance}\n`
+      + `fps=${this.fps}\npublish_delay_ms=${this.publishDelayMs}\n`;
     if (!force && body === this.lastControl && Date.now() - this.lastHeartbeat < 2000) return;
     const previous = await readTextFile(this.control);
     await writeTextFile(this.control, body, previous);
@@ -325,10 +328,16 @@ export default class WindowMonitor extends View {
       await hc(["kill", this.terminal, "--json"]);
       return;
     }
-    this.frameTimer = cx.timer.every(Math.round(1000 / fps), (cx) => this.readFrame(cx));
+    this.startFrameTimer(cx);
     this.saveSettings({ target: { app: this.selected.app, title: this.selected.title } });
     this.messageKey = "starting";
     this.claimedAt = 0; // publish the new target with the next claim
+  }
+
+  // Reads frames at the capture's frame rate.
+  startFrameTimer(cx) {
+    this.frameTimerFPS = this.fps;
+    this.frameTimer = cx.timer.every(Math.round(1000 / this.frameTimerFPS), (cx) => this.readFrame(cx));
   }
 
   stopFrameTimer() {
@@ -393,6 +402,11 @@ export default class WindowMonitor extends View {
       // copy's folder from one left behind by a reload or crash.
       if (this.setup === "ready") cx.spawn(async () => { try { await this.writeControl("pause"); } catch (_) {} });
       return;
+    }
+    // The frame rate changed in Settings while capturing.
+    if (this.frameTimer && this.frameTimerFPS !== this.fps) {
+      this.frameTimer.cancel();
+      this.startFrameTimer(cx);
     }
     this.polling = true;
     const address = this.terminal;

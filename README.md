@@ -34,7 +34,7 @@ Requirements: macOS 14 or later, Herdr 0.1.13 (the version this was tested with)
 
 ### Settings: frame rate
 
-The most new images per second: **1**, **2** (default), **5**, **10** or **20 fps**. A window that doesn't change sends no new images. A higher rate is smoother but uses more CPU and writes more PNG data (see Limits). With the 250 ms wait below, about 4 images per second at most, whatever the setting. Applies the next time a capture starts.
+The most new images per second: **1**, **2** (default), **5**, **10** or **20 fps**. A window that doesn't change sends no new images. A higher rate is smoother but uses more CPU and writes more PNG data (see Limits). With the 250 ms wait below, about 4 images per second at most, whatever the setting. Applies at once, also during a capture.
 
 ### Settings: wait before showing a new image
 
@@ -45,7 +45,7 @@ Herdr has no way to tell a mod that a new image has finished loading, so switchi
 | 0 ms · fastest (default) | about 0.2 s | now and then an instant blank or a jump back to the previous image |
 | 250 ms · less flicker | about 0.3 s more | none in short tests, but not guaranteed |
 
-The setting applies the next time a capture starts. The language follows macOS (Japanese or English).
+The setting applies at once, also during a capture. The language follows macOS (Japanese or English).
 
 ### Settings: load
 

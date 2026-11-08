@@ -23,7 +23,8 @@ usage: window-monitor-helper --window-id N --png-dir DIR --control FILE [--stats
 --thumbnails writes one PNG per listed window into the existing folder DIR
 (thumb-<id>.png, named by the row's "thumbnail" field); windows that could not
 be captured have none.
-control FILE lines: state=run|pause|stop, gui_pid=N, gui_window=N
+control FILE lines: state=run|pause|stop, gui_pid=N, gui_window=N, and optionally
+fps=N and publish_delay_ms=N, which replace --fps and --publish-delay-ms while running.
 The controller must refresh FILE at least every 10 seconds; the helper also
 exits when gui_pid exits. On exit it deletes the PNGs and metadata it wrote.
 """
@@ -163,23 +164,33 @@ final class Pool {
 
 // MARK: capture
 
-// Frame state belongs to capQueue. Lifecycle state belongs to ctlQueue, which
-// serializes async start/stop using a semaphore. Stats lock their own state;
-// the stream reference is installed before callbacks.
+// Frame state belongs to capQueue. Stream settings (size, frame rate, wait)
+// belong to cfgQueue: capQueue can be busy for seconds (each image may wait
+// up to 500 ms before it is announced), and a settings change must not queue
+// behind those images. Lifecycle state belongs to ctlQueue, which serializes
+// async start/stop using a semaphore. Stats lock their own state; the stream
+// reference is installed before callbacks.
 final class Monitor: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     let opt: Options
     let stats = Stats()
     let pool = Pool()
     let capQueue = DispatchQueue(label: "wm.capture", qos: .utility)
+    let cfgQueue = DispatchQueue(label: "wm.config")
     let ctlQueue = DispatchQueue(label: "wm.control")
 
     var stream: SCStream?
-    var width = 0, height = 0
     var lastHash: UInt64 = 0
-    var reconfiguring = false
     var running = false
     var pauseReasons: Set<String> = ["control"]
     var scratch: [UInt8] = []     // RGB pixels
+    // cfgQueue
+    var width = 0, height = 0
+    var fps: Double
+    var publishDelayMs: Int
+    var resizing = false          // window lookup for a resize in flight
+    var configUpdating = false    // updateConfiguration in flight
+    var configDirty = false       // size or fps changed during that update
+    // ctlQueue
     var guiSource: DispatchSourceProcess?
     var dirSource: DispatchSourceFileSystemObject?
     var visibilityTimer: DispatchSourceTimer?
@@ -188,7 +199,11 @@ final class Monitor: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     lazy var pngEncoder = PNGEncoder(metrics: stats.stages)
     var pngFiles: PNGFiles?
 
-    init(opt: Options) { self.opt = opt }
+    init(opt: Options) {
+        self.opt = opt
+        fps = opt.fps
+        publishDelayMs = opt.publishDelayMs
+    }
 
     func targetSize(for frame: CGRect, scale: CGFloat) -> (Int, Int) {
         fitSize(frame, scale: scale, maxEdge: opt.maxEdge)
@@ -206,7 +221,7 @@ final class Monitor: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
         c.scalesToFit = true
         c.preservesAspectRatio = true
         c.pixelFormat = kCVPixelFormatType_32BGRA
-        c.minimumFrameInterval = CMTime(seconds: 1 / opt.fps, preferredTimescale: 600)
+        c.minimumFrameInterval = CMTime(seconds: 1 / fps, preferredTimescale: 600)
         c.queueDepth = 3
         c.showsCursor = false
         c.capturesAudio = false
@@ -215,8 +230,7 @@ final class Monitor: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
 
     /// Prepares the stream paused; the control file decides when it runs.
     func start() async throws {
-        pngFiles = try PNGFiles(directory: opt.pngDirectory, publishDelay: Double(opt.publishDelayMs) / 1000,
-                                metrics: stats.stages)
+        pngFiles = try PNGFiles(directory: opt.pngDirectory, metrics: stats.stages)
         let s = try await makeStream()
         capQueue.sync { stream = s }
         stats.event("waiting for controller")
@@ -227,10 +241,13 @@ final class Monitor: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let frame = window.frame
         let scale = CGFloat(filter.pointPixelScale)
-        capQueue.sync { (width, height) = targetSize(for: frame, scale: scale) }
-        stats.with { $0.lastSize = "\(width)x\(height)" }
-        stats.event("window \(window.windowID) frame \(window.frame) -> \(width)x\(height)")
-        let s = SCStream(filter: filter, configuration: makeConfig(), delegate: self)
+        let (config, size) = cfgQueue.sync {
+            (width, height) = targetSize(for: frame, scale: scale)
+            return (makeConfig(), "\(width)x\(height)")
+        }
+        stats.with { $0.lastSize = size }
+        stats.event("window \(window.windowID) frame \(window.frame) -> \(size)")
+        let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: capQueue)
         return s
     }
@@ -333,14 +350,19 @@ final class Monitor: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
         var state = "pause"
         var gui: Int32 = 0
         var guiWindow: CGWindowID = 0
+        var fps: Double?
+        var delayMs: Int?
         for line in text.split(whereSeparator: \.isNewline) {
             let kv = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             guard kv.count == 2 else { continue }
             if kv[0] == "state" { state = kv[1] }
             if kv[0] == "gui_pid" { gui = Int32(kv[1]) ?? 0 }
             if kv[0] == "gui_window" { guiWindow = UInt32(kv[1]) ?? 0 }
+            if kv[0] == "fps" { fps = Double(kv[1]).flatMap { $0.isFinite && $0 > 0 && $0 <= 60 ? $0 : nil } }
+            if kv[0] == "publish_delay_ms" { delayMs = Int(kv[1]).flatMap { (0...500).contains($0) ? $0 : nil } }
         }
         if state == "stop" { finish(message: nil, code: 0) }
+        applyLimits(fps: fps, publishDelayMs: delayMs)
         if gui != watchedGUI {
             watchedGUI = gui
             guiSource?.cancel(); guiSource = nil
@@ -371,33 +393,63 @@ final class Monitor: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
         setPaused("gui-hidden", !(info[kCGWindowIsOnscreen as String] as? Bool ?? false))
     }
 
+    /// Takes new limits from the control file. The wait applies from the next
+    /// image; the frame rate updates the running (or paused) stream.
+    func applyLimits(fps newFPS: Double?, publishDelayMs newDelay: Int?) {
+        cfgQueue.async {
+            if let newDelay, newDelay != self.publishDelayMs {
+                self.publishDelayMs = newDelay
+                self.stats.event("publish delay \(newDelay) ms")
+            }
+            if let newFPS, newFPS != self.fps {
+                self.fps = newFPS
+                self.pushConfig()
+            }
+        }
+    }
+
     /// Re-read the window frame and update the stream size (window resized).
     func reconfigure() {
-        guard !reconfiguring, stream != nil else { return }
-        reconfiguring = true
-        Task {
-            guard let w = try? await self.findWindow() else {
-                self.capQueue.async { self.reconfiguring = false }
-                return
-            }
-            let frame = w.frame
-            let scale = CGFloat(SCContentFilter(desktopIndependentWindow: w).pointPixelScale)
-            self.capQueue.async {
-                let (nw, nh) = self.targetSize(for: frame, scale: scale)
-                guard nw != self.width || nh != self.height else {
-                    self.reconfiguring = false
+        cfgQueue.async {
+            guard !self.resizing, !self.configUpdating, self.stream != nil else { return }
+            self.resizing = true
+            Task {
+                guard let w = try? await self.findWindow() else {
+                    self.cfgQueue.async { self.resizing = false }
                     return
                 }
-                self.width = nw; self.height = nh
-                let config = self.makeConfig()
-                Task {
-                    do {
-                        try await self.stream!.updateConfiguration(config)
-                        self.stats.with { $0.reconfigs += 1; $0.lastSize = "\(nw)x\(nh)" }
-                        self.stats.event("reconfigured \(nw)x\(nh) for window \(frame)")
-                    } catch { self.stats.event("resize error \(error.localizedDescription)") }
-                    self.capQueue.async { self.reconfiguring = false }
+                let frame = w.frame
+                let scale = CGFloat(SCContentFilter(desktopIndependentWindow: w).pointPixelScale)
+                self.cfgQueue.async {
+                    self.resizing = false
+                    let (nw, nh) = self.targetSize(for: frame, scale: scale)
+                    guard nw != self.width || nh != self.height else { return }
+                    self.width = nw; self.height = nh
+                    self.stats.event("window resized to \(frame)")
+                    self.pushConfig()
                 }
+            }
+        }
+    }
+
+    /// Sends the current size and frame rate to the stream (cfgQueue). Updates
+    /// never overlap; a change made during one is sent once it finishes. A
+    /// stream rebuilt meanwhile already starts from the current values.
+    func pushConfig() {
+        guard let current = stream else { return }
+        guard !configUpdating else { configDirty = true; return }
+        configUpdating = true
+        let config = makeConfig()
+        let size = "\(width)x\(height)", fps = self.fps
+        Task {
+            do {
+                try await current.updateConfiguration(config)
+                self.stats.with { $0.reconfigs += 1; $0.lastSize = size }
+                self.stats.event("configured \(size) at \(fps) fps")
+            } catch { self.stats.event("configure error \(error.localizedDescription)") }
+            self.cfgQueue.async {
+                self.configUpdating = false
+                if self.configDirty { self.configDirty = false; self.pushConfig() }
             }
         }
     }
@@ -469,7 +521,8 @@ final class Monitor: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
         let encoded = scratch.withUnsafeBytes {
             pngEncoder.encode(rgb: UnsafeRawBufferPointer(rebasing: $0[..<need]), width: cw, height: ch, into: &png)
         }
-        guard encoded, pngFiles!.publish(png, width: cw, height: ch) else {
+        let delay = cfgQueue.sync { Double(publishDelayMs) / 1000 }
+        guard encoded, pngFiles!.publish(png, width: cw, height: ch, delay: delay) else {
             finish(message: "PNG publication failed", code: 1)
         }
         stats.with {
