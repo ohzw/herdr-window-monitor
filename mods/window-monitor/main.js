@@ -1020,9 +1020,29 @@ export default class WindowMonitor extends View {
     const t = this.t;
     const memory = this.helperMemory == null ? "—" : `${Math.round(this.helperMemory)}MB`;
     return h_flex().items_center().gap(8)
-      .child(div().flex_1().font_semibold().text_size(15).child(t.loadTitle))
+      .child(div().flex_1().child(this.sectionTitle("activity", t.loadTitle)))
       .child(div().id("load-memory").text_size(12).text_color(c.muted).tooltip(t.loadMemoryHint)
         .child(t.loadMemory(memory)));
+  }
+
+  // A settings section's heading: a muted icon, then the title.
+  sectionTitle(icon, title) {
+    const c = theme();
+    return h_flex().gap(6).items_center().font_medium()
+      .child(svg(this.icon(icon)).size(14).flex_none().text_color(c.muted))
+      .child(title);
+  }
+
+  // One choice of several, as a segmented control; the chosen one `solid`.
+  segmented(choices, enabled) {
+    const c = theme();
+    return h_flex().self_start().p(2).gap(2).rounded(6).border_1().border_color(c.border).text_size(12)
+      .when(!enabled, (el) => el.opacity(0.5))
+      .children(choices.map(({ id, label, active, onClick }) => h_flex().id(id).h(24).px(10).items_center().rounded(4)
+        .when(active, (el) => el.bg(c.solid).text_color(c.solid_foreground))
+        .when(!active, (el) => el.text_color(c.foreground))
+        .when(enabled && !active, (el) => el.cursor_pointer().hover((s) => s.bg(c.hover)).on_click((_event, cx) => onClick(cx)))
+        .child(label)));
   }
 
   renderSettings() {
@@ -1030,20 +1050,26 @@ export default class WindowMonitor extends View {
     const t = this.t;
     const fixed = this.config.fixed != null;
     const delay = this.config.fixed ?? this.settings.delayMs ?? 0;
-    return v_flex().id("settings").size_full().p(16).gap(10).bg(c.popover).text_color(c.foreground).text_size(13)
-      .child(div().font_semibold().text_size(15).child(t.fpsTitle))
-      .child(h_flex().gap(8).children(FPS_CHOICES.map((n) =>
-        this.button(`fps-${n}`, t.fpsChoice(n), true, () => this.saveSettings({ fps: n }), this.fps === n))))
-      .child(div().text_color(c.muted).child(t.fpsBody))
-      .child(div().font_semibold().text_size(15).child(t.delayTitle))
-      .child(h_flex().gap(8)
-        .child(this.button("delay-0", t.delayFast, !fixed, () => this.saveSettings({ delayMs: 0 }), delay === 0))
-        .child(this.button("delay-250", t.delaySmooth, !fixed, () => this.saveSettings({ delayMs: 250 }), delay === 250)))
-      .child(div().text_color(c.muted).child(fixed ? t.delayFixed : t.delayBody))
-      .child(this.loadHeading())
-      .child(this.loadCard())
-      .child(div().flex_1())
-      .child(h_flex().justify_end().child(this.button("close", t.close, true, () => closeOverlay(this.config.overlay))));
+    const section = (heading, ...rest) => v_flex().gap(8).child(heading).children(rest);
+    const note = (body) => div().text_size(12).text_color(c.muted).child(body);
+    return v_flex().id("settings").size_full().p(16).gap(16).bg(c.popover).text_color(c.foreground).text_size(13)
+      .child(h_flex().gap(10).items_center()
+        .child(h_flex().size(32).flex_none().items_center().justify_center().rounded(8).bg(c.surface)
+          .text_color(c.accent).child(svg(this.icon("settings")).size(16)))
+        .child(div().flex_1().font_semibold().text_size(15).child(t.settings))
+        .child(this.iconButton("close", "x", t.close, true, () => closeOverlay(this.config.overlay))))
+      .child(section(this.sectionTitle("gauge", t.fpsTitle),
+        this.segmented(FPS_CHOICES.map((n) => ({
+          id: `fps-${n}`, label: t.fpsChoice(n), active: this.fps === n, onClick: () => this.saveSettings({ fps: n }),
+        })), true),
+        note(t.fpsBody)))
+      .child(section(this.sectionTitle("timer", t.delayTitle),
+        this.segmented([
+          { id: "delay-0", label: t.delayFast, active: delay === 0, onClick: () => this.saveSettings({ delayMs: 0 }) },
+          { id: "delay-250", label: t.delaySmooth, active: delay === 250, onClick: () => this.saveSettings({ delayMs: 250 }) },
+        ], !fixed),
+        note(fixed ? t.delayFixed : t.delayBody)))
+      .child(section(this.loadHeading(), this.loadCard()));
   }
 
   setupPanel() {
